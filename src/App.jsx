@@ -1,9 +1,15 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import './App.css'
+import { supabase } from './lib/supabase'
+
+// n8n Webhook URL - CONFIGURE THIS
+const N8N_WEBHOOK_URL = 'YOUR_N8N_WEBHOOK_URL' // Substitua pela URL do seu webhook n8n
 
 function App() {
   const [step, setStep] = useState(1)
   const [showRejection, setShowRejection] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitted, setSubmitted] = useState(false)
   const [formData, setFormData] = useState({
     // SPIN Questions
     situation: '',
@@ -19,6 +25,20 @@ function App() {
   const [errors, setErrors] = useState({})
 
   const totalSteps = 8
+
+  // Facebook Pixel helper
+  const trackPixelEvent = (eventName, params = {}) => {
+    if (typeof window !== 'undefined' && window.fbq) {
+      window.fbq('track', eventName, params)
+    }
+  }
+
+  // Track step changes
+  useEffect(() => {
+    if (step === 5) {
+      trackPixelEvent('InitiateCheckout', { content_name: 'Exame de Vista', value: 180, currency: 'BRL' })
+    }
+  }, [step])
 
   // Validação de telefone brasileiro
   const validatePhone = (phone) => {
@@ -104,7 +124,73 @@ function App() {
     })
   }
 
-  const handleWhatsApp = () => {
+  // Salvar lead no Supabase e chamar webhook
+  const submitLead = async () => {
+    if (isSubmitting || submitted) return
+
+    setIsSubmitting(true)
+
+    try {
+      // 1. Salvar no Supabase
+      const leadData = {
+        name: formData.name,
+        phone: formData.phone,
+        email: formData.email,
+        situation: formData.situation,
+        problem: formData.problem,
+        implication: formData.implication
+      }
+
+      const { data, error } = await supabase
+        .from('leads')
+        .insert([leadData])
+        .select()
+        .single()
+
+      if (error) {
+        console.error('Supabase error:', error)
+      }
+
+      // 2. Chamar webhook do n8n (se configurado)
+      if (N8N_WEBHOOK_URL && N8N_WEBHOOK_URL !== 'YOUR_N8N_WEBHOOK_URL') {
+        try {
+          await fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...leadData,
+              id: data?.id,
+              created_at: new Date().toISOString(),
+              situation_label: situationLabels[formData.situation],
+              problem_label: problemLabels[formData.problem],
+              implication_label: implicationLabels[formData.implication]
+            })
+          })
+        } catch (webhookError) {
+          console.error('Webhook error:', webhookError)
+        }
+      }
+
+      // 3. Facebook Pixel - Lead event
+      trackPixelEvent('Lead', {
+        content_name: 'Exame de Vista',
+        value: 180,
+        currency: 'BRL'
+      })
+
+      setSubmitted(true)
+
+    } catch (err) {
+      console.error('Submit error:', err)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleWhatsApp = async () => {
+    // Salvar lead antes de abrir WhatsApp
+    await submitLead()
+
     const phoneNumber = '5547989146073' // Central da Visão BC
     const message = `Olá! Quero agendar meu *Exame de Vista* na Central da Visão.
 
