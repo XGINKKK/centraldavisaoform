@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import { supabase } from './lib/supabase'
-
 // n8n Webhook URL - CONFIGURE THIS
-const N8N_WEBHOOK_URL = 'YOUR_N8N_WEBHOOK_URL' // Substitua pela URL do seu webhook n8n
+const N8N_WEBHOOK_URL = 'https://dinastia-n8n-webhook.qvhrom.easypanel.host/webhook/central-da-visao' // Substitua pela URL do seu webhook n8n
+
+import Dashboard from './Dashboard'
 
 function App() {
   const [step, setStep] = useState(1)
   const [showRejection, setShowRejection] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  const [isSuccess, setIsSuccess] = useState(false)
   const [formData, setFormData] = useState({
     // SPIN Questions
     situation: '',
@@ -24,7 +26,13 @@ function App() {
   })
   const [errors, setErrors] = useState({})
 
-  const totalSteps = 8
+  // Dashboard Route Check
+  const [isDashboard, setIsDashboard] = useState(window.location.pathname === '/dashadmin')
+
+  // Funnel Tracking State
+  const [sessionId, setSessionId] = useState('')
+
+  const totalSteps = 7
 
   // Facebook Pixel helper
   const trackPixelEvent = (eventName, params = {}) => {
@@ -33,11 +41,68 @@ function App() {
     }
   }
 
-  // Track step changes
+  // Track step changes and PageView on mount
+  useEffect(() => {
+    // 1. Check if Dashboard
+    if (window.location.pathname === '/dashadmin') {
+      setIsDashboard(true)
+      return
+    }
+
+    // 2. Generate Session ID for Funnel Tracking
+    let currentSession = sessionStorage.getItem('funnel_session_id')
+    if (!currentSession) {
+      currentSession = crypto.randomUUID()
+      sessionStorage.setItem('funnel_session_id', currentSession)
+    }
+    setSessionId(currentSession)
+
+    // 3. Track Initial PageView & Step 1
+    trackPixelEvent('PageView')
+    trackFunnelStep(1, 'situation', currentSession)
+
+  }, [])
+
+  // Helper to track funnel steps in Supabase
+  const trackFunnelStep = async (stepNum, stepName, activeSessionId = sessionId) => {
+    if (!activeSessionId) return
+
+    try {
+      await supabase.from('funnel_events').insert({
+        session_id: activeSessionId,
+        step_number: stepNum,
+        step_name: stepName,
+        metadata: { timestamp: new Date().toISOString() }
+      })
+    } catch (err) {
+      console.error('Tracking error:', err)
+    }
+  }
+
   useEffect(() => {
     if (step === 5) {
-      trackPixelEvent('InitiateCheckout', { content_name: 'Exame de Vista', value: 180, currency: 'BRL' })
+      trackPixelEvent('InitiateCheckout', {
+        content_name: 'Exame de Vista',
+        content_category: 'Health',
+        value: 180,
+        currency: 'BRL'
+      })
     }
+
+    // Track step progression
+    const stepNames = {
+      1: 'situation',
+      2: 'problem',
+      3: 'implication',
+      4: 'qualification',
+      5: 'phone', // whatsapp
+      6: 'name',
+      7: 'success'
+    }
+    if (step > 1 && sessionId) {
+      trackFunnelStep(step, stepNames[step] || `step_${step}`)
+    }
+
   }, [step])
 
   // Validação de telefone brasileiro
@@ -98,10 +163,6 @@ function App() {
       setErrors({ name: 'Por favor, digite seu nome completo' })
       return
     }
-    if (step === 7 && !validateEmail(formData.email)) {
-      setErrors({ email: 'Email inválido' })
-      return
-    }
 
     setStep(prev => prev + 1)
   }
@@ -154,58 +215,69 @@ function App() {
       // 2. Chamar webhook do n8n (se configurado)
       if (N8N_WEBHOOK_URL && N8N_WEBHOOK_URL !== 'YOUR_N8N_WEBHOOK_URL') {
         try {
-          await fetch(N8N_WEBHOOK_URL, {
+          const webhookPayload = {
+            lead: {
+              id: data?.id,
+              nome: formData.name,
+              telefone: formData.phone,
+              email: formData.email
+            },
+            questionario: {
+              ultimoExame: situationLabels[formData.situation],
+              sintomas: problemLabels[formData.problem],
+              impactoNoDiaADia: implicationLabels[formData.implication]
+            },
+            servico: {
+              nome: 'Exame de Vista',
+              valor: 'R$ 180,00',
+              tipo: 'Particular'
+            },
+            clinica: {
+              nome: 'Central da Visão',
+              cidade: 'Balneário Camboriú',
+              whatsapp: '5547989146073'
+            },
+            metadata: {
+              dataHora: new Date().toISOString(),
+              origem: 'Formulário Web',
+              status: 'Novo Lead'
+            }
+          }
+
+          const response = await fetch(N8N_WEBHOOK_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...leadData,
-              id: data?.id,
-              created_at: new Date().toISOString(),
-              situation_label: situationLabels[formData.situation],
-              problem_label: problemLabels[formData.problem],
-              implication_label: implicationLabels[formData.implication]
-            })
+            body: JSON.stringify(webhookPayload)
           })
+
+          if (!response.ok) throw new Error('Erro no webhook')
+
         } catch (webhookError) {
           console.error('Webhook error:', webhookError)
+          // Mesmo com erro no webhook, seguimos pois o lead foi salvo no Supabase
         }
       }
 
-      // 3. Facebook Pixel - Lead event
+      // 3. Facebook Pixel - Lead event (Client-side)
       trackPixelEvent('Lead', {
         content_name: 'Exame de Vista',
+        content_category: 'Health',
         value: 180,
         currency: 'BRL'
       })
 
       setSubmitted(true)
+      setIsSuccess(true) // Mostra tela de sucesso
 
     } catch (err) {
       console.error('Submit error:', err)
+      // Opcional: Mostrar erro para o usuário
     } finally {
       setIsSubmitting(false)
     }
   }
 
-  const handleWhatsApp = async () => {
-    // Salvar lead antes de abrir WhatsApp
-    await submitLead()
 
-    const phoneNumber = '5547989146073' // Central da Visão BC
-    const message = `Olá! Quero agendar meu *Exame de Vista* na Central da Visão.
-
-*Dados do Paciente:*
-👤 Nome: ${formData.name}
-📱 Telefone: ${formData.phone}
-📧 Email: ${formData.email}
-
-📋 *Informações:*
-• Último exame: ${situationLabels[formData.situation]}
-• Sintomas: ${problemLabels[formData.problem]}
-• Impacto: ${implicationLabels[formData.implication]}`
-    const url = `https://wa.me/${phoneNumber}?text=${encodeURIComponent(message)}`
-    window.open(url, '_blank')
-  }
 
   // Labels para o resumo
   const situationLabels = {
@@ -299,6 +371,10 @@ function App() {
         </div>
       </div>
     )
+  }
+
+  if (isDashboard) {
+    return <Dashboard />
   }
 
   return (
@@ -520,16 +596,20 @@ function App() {
                   <line x1="12" y1="18" x2="12.01" y2="18" />
                 </svg>
               </div>
-              <h2>Qual seu telefone?</h2>
-              <p className="info-text">Para confirmarmos seu agendamento</p>
+              <h2>Qual seu WhatsApp?</h2>
+              <p className="info-text">É por ele que vamos confirmar seu agendamento</p>
               <input
                 type="tel"
+                inputMode="numeric"
+                autoComplete="tel"
+                enterKeyHint="next"
                 className="input-field"
                 placeholder="(47) 98888-8888"
                 value={formData.phone}
                 onChange={(e) => handleInputChange('phone', e.target.value)}
                 maxLength={15}
                 autoFocus
+                onKeyDown={(e) => e.key === 'Enter' && nextStep()}
               />
               {errors.phone && <p className="error">{errors.phone}</p>}
             </div>
@@ -547,69 +627,83 @@ function App() {
               <h2>Qual seu nome completo?</h2>
               <input
                 type="text"
+                autoComplete="name"
+                enterKeyHint="next"
                 className="input-field"
                 placeholder="Digite seu nome completo"
                 value={formData.name}
                 onChange={(e) => handleInputChange('name', e.target.value)}
                 autoFocus
+                onKeyDown={(e) => e.key === 'Enter' && nextStep()}
               />
               {errors.name && <p className="error">{errors.name}</p>}
             </div>
           )}
 
-          {/* ===== ETAPA 7: EMAIL ===== */}
+          {/* ===== ETAPA 7: FINALIZAÇÃO / PENDING / SUCCESS ===== */}
           {step === 7 && (
-            <div className="step-wrapper">
-              <div className="step-icon">
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#3d3e91" strokeWidth="2">
-                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
-                  <polyline points="22,6 12,13 2,6" />
-                </svg>
-              </div>
-              <h2>Qual seu email?</h2>
-              <p className="info-text">Para enviarmos a confirmação</p>
-              <input
-                type="email"
-                className="input-field"
-                placeholder="seuemail@exemplo.com"
-                value={formData.email}
-                onChange={(e) => handleInputChange('email', e.target.value)}
-                autoFocus
-              />
-              {errors.email && <p className="error">{errors.email}</p>}
-            </div>
-          )}
+            <div className={`step-wrapper ${isSuccess ? 'success-view' : ''}`}>
 
-          {/* ===== ETAPA 8: FINALIZAÇÃO ===== */}
-          {step === 8 && (
-            <div className="step-wrapper success">
-              <div className="success-icon">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              </div>
-              <h2>Perfeito, {formData.name.split(' ')[0]}!</h2>
-              <p className="info-text">Clique abaixo para agendar seu exame pelo WhatsApp</p>
-              <div className="summary">
-                <p><strong>Nome:</strong> {formData.name}</p>
-                <p><strong>Telefone:</strong> {formData.phone}</p>
-                <p><strong>Email:</strong> {formData.email}</p>
-                <hr />
-                <p><strong>Último exame:</strong> {situationLabels[formData.situation]}</p>
-                <p><strong>Sintoma:</strong> {problemLabels[formData.problem]}</p>
-              </div>
-              <button className="btn-whatsapp" onClick={handleWhatsApp}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" />
-                </svg>
-                Agendar pelo WhatsApp
-              </button>
+              {/* LOADING STATE - Waiting for n8n */}
+              {isSubmitting && (
+                <div className="loading-state">
+                  <div className="spinner"></div>
+                  <h2>Enviando solicitação...</h2>
+                  <p className="info-text">Aguarde um momento, estamos processando seu agendamento.</p>
+                </div>
+              )}
+
+              {/* SUCCESS STATE - n8n responded */}
+              {!isSubmitting && isSuccess && (
+                <div className="success-content">
+                  <div className="success-icon animate-pop">
+                    <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  </div>
+                  <h2>Solicitação Recebida!</h2>
+                  <p className="info-text">Recebemos seus dados com sucesso.</p>
+
+                  <div className="success-message-box">
+                    <p>Vamos entrar em contato com você pelo WhatsApp <strong>{formData.phone}</strong> para finalizar o agendamento.</p>
+                  </div>
+
+                  <p className="footer-note">Central da Visão • Balneário Camboriú</p>
+                </div>
+              )}
+
+              {/* INITIAL REVIEW STATE (Before click) */}
+              {!isSubmitting && !isSuccess && (
+                <>
+                  <div className="success-icon icon-review">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#3d3e91" strokeWidth="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                      <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                  </div>
+                  <h2>Confirme seus dados</h2>
+                  <p className="info-text">Verifique se está tudo correto antes de enviar</p>
+                  <div className="summary">
+                    <p><strong>Nome:</strong> {formData.name}</p>
+                    <p><strong>WhatsApp:</strong> {formData.phone}</p>
+                    <hr />
+                    <p><strong>Último exame:</strong> {situationLabels[formData.situation]}</p>
+                    <p><strong>Sintoma:</strong> {problemLabels[formData.problem]}</p>
+                  </div>
+                  <button className="btn-primary btn-large" onClick={submitLead}>
+                    Confirmar Solicitação
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>
 
         <div className="button-group">
-          {step > 1 && step < 8 && (
+          {step > 1 && step < 7 && (
             <button className="btn-secondary" onClick={prevStep}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="15 18 9 12 15 6" />
@@ -617,7 +711,7 @@ function App() {
               Voltar
             </button>
           )}
-          {step < 8 && (
+          {step < 7 && (
             <button className="btn-primary" onClick={nextStep}>
               {step === 4 ? 'Quero agendar' : 'Continuar'}
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
