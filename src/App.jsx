@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import './App.css'
 import { supabase } from './lib/supabase'
-// n8n Webhook URL - CONFIGURE THIS
-const N8N_WEBHOOK_URL = 'https://dinastia-n8n-webhook.qvhrom.easypanel.host/webhook/central-da-visao' // Substitua pela URL do seu webhook n8n
+// n8n Webhook URL - Environment Variable
+const N8N_WEBHOOK_URL = import.meta.env.VITE_N8N_WEBHOOK_URL
 
 import Dashboard from './Dashboard'
 

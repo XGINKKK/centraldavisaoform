@@ -37,8 +37,9 @@ const Dashboard = () => {
     const [recentLeads, setRecentLeads] = useState([])
 
     // Hardcoded credentials as requested
-    const ADMIN_USER = 'admin'
-    const ADMIN_PASS = 'admin123'
+    // Environment Credentials
+    const ADMIN_USER = import.meta.env.VITE_ADMIN_USER || 'admin'
+    const ADMIN_PASS = import.meta.env.VITE_ADMIN_PASS || 'admin123'
 
     useEffect(() => {
         const sessionAuth = sessionStorage.getItem('dash_auth')
@@ -83,11 +84,21 @@ const Dashboard = () => {
             const stepCounts = {}
             const uniqueSessions = new Set()
 
+            const stepTranslations = {
+                'situation': '1. Situação',
+                'problem': '2. Problema',
+                'implication': '3. Implicação',
+                'qualification': '4. Qualificação',
+                'phone': '5. WhatsApp',
+                'name': '6. Nome',
+                'success': '7. Sucesso'
+            }
+
             events.forEach(event => {
                 uniqueSessions.add(event.session_id)
                 if (!stepCounts[event.step_number]) {
                     stepCounts[event.step_number] = {
-                        name: event.step_name || `Etapa ${event.step_number}`,
+                        name: stepTranslations[event.step_name] || event.step_name || `Etapa ${event.step_number}`,
                         count: 0,
                         step: event.step_number
                     }
